@@ -1,30 +1,43 @@
 import asyncio
 import json
 import base64
-import shutil
 import os
+import shutil
 from urllib.parse import urljoin
 import websockets
 import aiohttp
 import requests
 from playwright.async_api import async_playwright
 from instagrapi import Client
+from filelock import FileLock
 
 PROFILES_DIR = "/var/www/firefox_profiles"
 DJANGO_SERVICE_CREATE_PROFILE_URL = "http://127.0.0.1:6688/api/social-media/profile/"
 STREAM_FPS = 3
 JPEG_QUALITY = 20
 
+PROXY_HOST = "proxy.ghostvps.com"
+PROXY_PASSWORD = "92964b4ea532a8e1"
+PROFILE_LOCK_DIR = os.path.join(PROFILES_DIR, ".locks")
+
 os.makedirs(PROFILES_DIR, exist_ok=True)
+os.makedirs(PROFILE_LOCK_DIR, exist_ok=True)
 
 playwright = None
+
+_profile_locks = {}
+
+
+def profile_lock_path(profile_path):
+    name = os.path.basename(profile_path.rstrip("/").rstrip("\\"))
+    return os.path.join(PROFILE_LOCK_DIR, f"ffprofile-{name}.lock")
 
 def build_auth_headers(token):
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
 
-def generate_instagrapi_session(playwright_cookies, output_json_path,port, username):
+def generate_instagrapi_session(playwright_cookies, output_json_path, port, username):
     cookie_dict = {
         c["name"]: c["value"]
         for c in playwright_cookies
@@ -37,7 +50,7 @@ def generate_instagrapi_session(playwright_cookies, output_json_path,port, usern
 
     try:
         cl = Client()
-        proxy_url = f"{username}:92964b4ea532a8e1@proxy.ghostvps.com:{port}"
+        proxy_url = f"{username}:{PROXY_PASSWORD}@{PROXY_HOST}:{port}"
         cl.set_proxy(proxy_url)
         cl.login_by_sessionid(cookie_dict["sessionid"])
         cl.dump_settings(output_json_path)
@@ -107,13 +120,16 @@ async def stream(ws, page):
         print("stream error:", e)
 
 async def get_page(path, username, port):
+    lock = FileLock(profile_lock_path(path), timeout=30)
+    await asyncio.to_thread(lock.acquire)
+
     browser = await playwright.firefox.launch_persistent_context(
-        headless=False,
         user_data_dir=path,
+        headless=False,
         proxy={
-            "server": f"http://proxy.ghostvps.com:{port}",
+            "server": f"http://{PROXY_HOST}:{port}",
             "username": username,
-            "password": "92964b4ea532a8e1"
+            "password": PROXY_PASSWORD
         },
         locale="en-US",
         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
@@ -132,6 +148,9 @@ async def get_page(path, username, port):
             "toolkit.telemetry.reportingpolicy.firstRun": False,
         }
     )
+
+
+    _profile_locks[id(browser)] = lock
 
     page = await browser.new_page()
     await page.set_viewport_size({"width": 1280, "height": 720})
@@ -162,6 +181,13 @@ async def clean_up(ws, stream_task, browser, page):
             await browser.close()
         except:
             pass
+
+        lock = _profile_locks.pop(id(browser), None)
+        if lock:
+            try:
+                lock.release()
+            except:
+                pass
 
     try:
         await ws.close()
@@ -476,6 +502,7 @@ async def edit_handler(ws):
     finally:
         await clean_up(ws, stream_task, browser, page)
             # stop_proxy(pid)
+
 
 async def router(ws):
     path = ws.request.path
