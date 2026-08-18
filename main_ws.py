@@ -9,7 +9,7 @@ import aiohttp
 import requests
 from playwright.async_api import async_playwright
 from instagrapi import Client
-from filelock import FileLock
+from filelock import FileLock, Timeout as LockTimeout
 
 PROFILES_DIR = "/var/www/firefox_profiles"
 DJANGO_SERVICE_CREATE_PROFILE_URL = "http://127.0.0.1:6688/api/social-media/profile/"
@@ -19,13 +19,13 @@ JPEG_QUALITY = 20
 PROXY_HOST = "proxy.ghostvps.com"
 PROXY_PASSWORD = "92964b4ea532a8e1"
 PROFILE_LOCK_DIR = os.path.join(PROFILES_DIR, ".locks")
+PROFILE_LOCK_TIMEOUT = 180
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(PROFILE_LOCK_DIR, exist_ok=True)
 
 playwright = None
 
-_profile_locks = {}
 
 
 def profile_lock_path(profile_path):
@@ -120,55 +120,85 @@ async def stream(ws, page):
         print("stream error:", e)
 
 async def get_page(path, username, port):
-    lock = FileLock(profile_lock_path(path), timeout=30)
+    """
+    Returns (browser, page, lock). The caller MUST pass `lock` to clean_up().
+
+    thread_local=False is essential, not cosmetic. FileLock defaults to
+    thread_local=True, which records the lock's fd and counter in
+    thread-local storage. We acquire inside asyncio.to_thread (a worker
+    thread) but release from the event loop thread — where a thread_local
+    lock looks unheld, so release() silently does nothing and the OS lock
+    leaks until the process exits. That is why a second open of the same
+    profile always timed out.
+    """
+    lock = FileLock(
+        profile_lock_path(path),
+        timeout=PROFILE_LOCK_TIMEOUT,
+        thread_local=False,
+    )
     await asyncio.to_thread(lock.acquire)
 
-    browser = await playwright.firefox.launch_persistent_context(
-        user_data_dir=path,
-        headless=False,
-        proxy={
-            "server": f"http://{PROXY_HOST}:{port}",
-            "username": username,
-            "password": PROXY_PASSWORD
-        },
-        locale="en-US",
-        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        firefox_user_prefs={
-            "intl.accept_languages": "en-US,en",
-            "intl.locale.requested": "en-US",
-            "javascript.use_us_english_locale": True,
-            "media.peerconnection.enabled": False,
-            "geo.enabled": False,
-            "toolkit.telemetry.enabled": False,
-            "network.predictor.enabled": False,
-            "browser.startup.homepage_override.mstone": "ignore",
-            "startup.homepage_welcome_url": "about:blank",
-            "startup.homepage_welcome_url.additional": "",
-            "browser.usedOnWindows10": True,
-            "toolkit.telemetry.reportingpolicy.firstRun": False,
-        }
-    )
+    try:
+        browser = await playwright.firefox.launch_persistent_context(
+            user_data_dir=path,
+            headless=False,
+            proxy={
+                "server": f"http://{PROXY_HOST}:{port}",
+                "username": username,
+                "password": PROXY_PASSWORD
+            },
+            locale="en-US",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            firefox_user_prefs={
+                "intl.accept_languages": "en-US,en",
+                "intl.locale.requested": "en-US",
+                "javascript.use_us_english_locale": True,
+                "media.peerconnection.enabled": False,
+                "geo.enabled": False,
+                "toolkit.telemetry.enabled": False,
+                "network.predictor.enabled": False,
+                "browser.startup.homepage_override.mstone": "ignore",
+                "startup.homepage_welcome_url": "about:blank",
+                "startup.homepage_welcome_url.additional": "",
+                "browser.usedOnWindows10": True,
+                "toolkit.telemetry.reportingpolicy.firstRun": False,
+            }
+        )
+
+        page = await browser.new_page()
+        await page.set_viewport_size({"width": 1280, "height": 720})
+        await page.goto("about:blank")
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        """)
+    except Exception:
+        release_lock(lock)
+        raise
+
+    return browser, page, lock
 
 
-    _profile_locks[id(browser)] = lock
+def release_lock(lock):
+    if not lock:
+        return
+    try:
+        lock.release()
+    except Exception as e:
+        print("lock release failed:", e)
 
-    page = await browser.new_page()
-    await page.set_viewport_size({"width": 1280, "height": 720})
-    await page.goto("about:blank")
-    await page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    """)
 
-    return browser, page
-
-async def clean_up(ws, stream_task, browser, page):
+async def clean_up(ws, stream_task, browser, page, lock=None):
     if stream_task:
         stream_task.cancel()
         try:
             await stream_task
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            # Must not propagate: an exception here used to skip the lock
+            # release entirely.
+            print("stream task error during cleanup:", e)
 
     if page:
         try:
@@ -182,12 +212,10 @@ async def clean_up(ws, stream_task, browser, page):
         except:
             pass
 
-        lock = _profile_locks.pop(id(browser), None)
-        if lock:
-            try:
-                lock.release()
-            except:
-                pass
+    # Release AFTER the browser is closed — Firefox only lets go of the
+    # profile directory at that point. Outside `if browser` so the lock is
+    # returned even when the browser failed to start.
+    release_lock(lock)
 
     try:
         await ws.close()
@@ -197,6 +225,7 @@ async def clean_up(ws, stream_task, browser, page):
 async def add_handler(ws):
     browser = None
     page = None
+    profile_lock = None
     stream_task = None
     platform = None
     port = None
@@ -225,7 +254,9 @@ async def add_handler(ws):
                     await ws.send(json.dumps(data))
                 else:
                     profile_path, profile_name, port = data
-                    browser, page = await get_page(profile_path, proxy_username, port)
+                    browser, page, profile_lock = await get_page(
+                        profile_path, proxy_username, port
+                    )
 
                     await ws.send(json.dumps({
                         "type": "size",
@@ -366,17 +397,18 @@ async def add_handler(ws):
                             except:
                                 print(await response.text())
 
-                await clean_up(ws, stream_task, browser, page)
+                await clean_up(ws, stream_task, browser, page, profile_lock)
     except websockets.ConnectionClosed:
         print("client disconnected")
 
     finally:
-        await clean_up(ws, stream_task, browser, page)
+        await clean_up(ws, stream_task, browser, page, profile_lock)
 
 
 async def edit_handler(ws):
     browser = None
     page = None
+    profile_lock = None
     stream_task = None
     profile_path = None
     platform = None
@@ -384,6 +416,7 @@ async def edit_handler(ws):
     proxy_username = None
     bot_id = None
     auth_headers = {}
+    session_data_str = None
 
     try:
         async for msg in ws:
@@ -415,7 +448,16 @@ async def edit_handler(ws):
                     "h": 720
                 }))
 
-                browser, page = await get_page(profile_path, proxy_username, port)
+                try:
+                    browser, page, profile_lock = await get_page(
+                        profile_path, proxy_username, port
+                    )
+                except LockTimeout:
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "msg": "this profile is busy (being refreshed or open elsewhere), please try again shortly"
+                    }))
+                    break
 
                 if stream_task is None:
                     stream_task = asyncio.create_task(stream(ws, page))
@@ -495,12 +537,12 @@ async def edit_handler(ws):
                                 print(await response.json())
                             except:
                                 print(await response.text())
-                await clean_up(ws, stream_task, browser, page)
+                await clean_up(ws, stream_task, browser, page, profile_lock)
     except websockets.ConnectionClosed:
         print("client disconnected")
 
     finally:
-        await clean_up(ws, stream_task, browser, page)
+        await clean_up(ws, stream_task, browser, page, profile_lock)
             # stop_proxy(pid)
 
 
