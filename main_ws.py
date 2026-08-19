@@ -393,8 +393,6 @@ async def add_handler(ws):
                                     "social_media": platform,
                                     "max_actions_per_hour": max_actions_per_hour,
                                     "username": username,
-                                    "session_updated_at": None,
-                                    "session_refresh_error": None,
                                     "proxy": {
                                         "host": "proxy.ghostvps.com",
                                         "port": port,
