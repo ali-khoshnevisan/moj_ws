@@ -408,6 +408,7 @@ async def add_handler(ws):
                             if 200 <= int(response.status) < 300:
                                 await ws.send(json.dumps({"status": "profile is created"}))
                             else:
+                                print(response)
 
                                 await ws.send(json.dumps({"status": "profile is not created"}))
                                 profile_state = False
