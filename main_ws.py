@@ -1,6 +1,7 @@
 import asyncio
 import json
 import base64
+import math
 import os
 import shutil
 from urllib.parse import urljoin
@@ -383,6 +384,8 @@ async def add_handler(ws):
                     except Exception as e:
                         print(f"error in Cookie extraction: {e}")
                 if profile_path and platform and url and session_data_str:
+                    max_actions_count = max_actions_per_hour["follow"] + max_actions_per_hour["comment"] + max_actions_per_hour["like"] + max_actions_per_hour["direct"]
+                    pause_time = math.ceil(60 / max_actions_count)
                     async with aiohttp.ClientSession() as session:
                         async with session.post(
                                 DJANGO_SERVICE_CREATE_PROFILE_URL,
@@ -393,6 +396,7 @@ async def add_handler(ws):
                                     "social_media": platform,
                                     "max_actions_per_hour": max_actions_per_hour,
                                     "username": username,
+                                    "pause_time": pause_time,
                                     "proxy": {
                                         "host": "proxy.ghostvps.com",
                                         "port": port,
