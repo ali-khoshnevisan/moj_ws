@@ -9,6 +9,7 @@ import aiohttp
 import requests
 from playwright.async_api import async_playwright
 from instagrapi import Client
+from instagrapi.exceptions import ChallengeRequired, LoginRequired, BadPassword
 from filelock import FileLock, Timeout as LockTimeout
 
 PROFILES_DIR = "/var/www/firefox_profiles"
@@ -46,7 +47,7 @@ def generate_instagrapi_session(playwright_cookies, output_json_path, port, user
 
     if "sessionid" not in cookie_dict:
         print("session id not found!")
-        return False
+        return False, "auth"
 
     try:
         cl = Client()
@@ -55,10 +56,30 @@ def generate_instagrapi_session(playwright_cookies, output_json_path, port, user
         cl.login_by_sessionid(cookie_dict["sessionid"])
         cl.dump_settings(output_json_path)
         print(f"session file created successfully: {output_json_path}")
-        return True
+        return True, None
+    except (ChallengeRequired, LoginRequired, BadPassword) as e:
+        print(f"instagram rejected the login ({type(e).__name__}): {e}")
+        return False, "auth"
     except Exception as e:
         print(f"error in create session id with instagrapi: {e}")
+        return False, "error"
+
+async def patch_profile(bot_id, auth_headers, payload):
+    """PATCH fields onto a profile in Django. Returns True on 2xx."""
+    update_url = f"{DJANGO_SERVICE_CREATE_PROFILE_URL.rstrip('/')}/{bot_id}/"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(update_url, headers=auth_headers, json=payload) as response:
+                ok = 200 <= int(response.status) < 300
+                try:
+                    print("patch_profile:", response.status, await response.json())
+                except Exception:
+                    print("patch_profile:", response.status, await response.text())
+                return ok
+    except Exception as e:
+        print("patch_profile failed:", e)
         return False
+
 
 async def create_profile(headers):
     try:
@@ -120,17 +141,6 @@ async def stream(ws, page):
         print("stream error:", e)
 
 async def get_page(path, username, port):
-    """
-    Returns (browser, page, lock). The caller MUST pass `lock` to clean_up().
-
-    thread_local=False is essential, not cosmetic. FileLock defaults to
-    thread_local=True, which records the lock's fd and counter in
-    thread-local storage. We acquire inside asyncio.to_thread (a worker
-    thread) but release from the event loop thread — where a thread_local
-    lock looks unheld, so release() silently does nothing and the OS lock
-    leaks until the process exits. That is why a second open of the same
-    profile always timed out.
-    """
     lock = FileLock(
         profile_lock_path(path),
         timeout=PROFILE_LOCK_TIMEOUT,
@@ -348,7 +358,7 @@ async def add_handler(ws):
                         session_file_name = f"session_{profile_name}.json"
                         temp_session_path = os.path.join(PROFILES_DIR, session_file_name)
 
-                        is_session_created = await asyncio.to_thread(
+                        is_session_created, failure_kind = await asyncio.to_thread(
                             generate_instagrapi_session,
                             playwright_cookies,
                             temp_session_path,
@@ -361,6 +371,14 @@ async def add_handler(ws):
                             os.remove(temp_session_path)
                         else:
                             print('Session creation failed or file does not exist.')
+                            if failure_kind == "auth":
+                                # New profile never actually got logged in.
+                                await ws.send(json.dumps({
+                                    "type": "error",
+                                    "msg": "Instagram rejected this login (challenge or "
+                                           "incomplete sign-in). Please log in fully and "
+                                           "complete any verification before finishing."
+                                }))
 
                     except Exception as e:
                         print(f"error in Cookie extraction: {e}")
@@ -375,6 +393,8 @@ async def add_handler(ws):
                                     "social_media": platform,
                                     "max_actions_per_hour": max_actions_per_hour,
                                     "username": username,
+                                    "session_updated_at": None,
+                                    "session_refresh_error": None,
                                     "proxy": {
                                         "host": "proxy.ghostvps.com",
                                         "port": port,
@@ -491,6 +511,7 @@ async def edit_handler(ws):
                     await page.keyboard.type(data["text"])
 
             elif data["type"] == "end":
+                failure_kind = None
                 if platform == "instagram" and page:
                     try:
                         print("Cookie extractions (Edit Mode)")
@@ -500,7 +521,7 @@ async def edit_handler(ws):
                         session_file_name = f"session_{profile_name}.json"
                         temp_session_path = os.path.join(PROFILES_DIR, session_file_name)
 
-                        is_session_created = await asyncio.to_thread(
+                        is_session_created, failure_kind = await asyncio.to_thread(
                             generate_instagrapi_session,
                             playwright_cookies,
                             temp_session_path,
@@ -512,31 +533,37 @@ async def edit_handler(ws):
                             with open(temp_session_path, 'r', encoding='utf-8') as f:
                                 session_data_str = f.read()
                             os.remove(temp_session_path)
-
-                        print('session_data_str successfully updated for edit.')
+                            print('session_data_str successfully updated for edit.')
                     except Exception as e:
+                        failure_kind = "error"
                         print(f"error in Cookie extraction (Edit Mode): {e}")
 
+                # Instagram rejected the login (challenge/checkpoint, dead
+                # session, bad credentials). Retrying can't fix it, so flag
+                # the profile for manual attention and stop here.
+                if failure_kind == "auth" and bot_id:
+                    await patch_profile(bot_id, auth_headers, {
+                        "status": "profile-is-not-login",
+                    })
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "status": "profile is not logged in",
+                        "msg": "Instagram rejected this login (challenge or expired session). "
+                               "The profile has been marked as not logged in — please log in "
+                               "again and complete any verification Instagram asks for."
+                    }))
+                    await clean_up(ws, stream_task, browser, page, profile_lock)
+                    break
+
                 if session_data_str and bot_id:
-                    async with aiohttp.ClientSession() as session:
-                        update_url = f"{DJANGO_SERVICE_CREATE_PROFILE_URL.rstrip('/')}/{bot_id}/"
+                    ok = await patch_profile(bot_id, auth_headers, {
+                        "firefox_json_path": session_data_str,
+                    })
+                    if ok:
+                        await ws.send(json.dumps({"status": "profile session updated successfully"}))
+                    else:
+                        await ws.send(json.dumps({"status": "profile session update failed"}))
 
-                        async with session.patch(
-                                update_url,
-                                headers=auth_headers,
-                                json={
-                                    "firefox_json_path": session_data_str,
-                                }
-                        ) as response:
-                            if 200 <= int(response.status) < 300:
-                                await ws.send(json.dumps({"status": "profile session updated successfully"}))
-                            else:
-                                await ws.send(json.dumps({"status": "profile session update failed"}))
-
-                            try:
-                                print(await response.json())
-                            except:
-                                print(await response.text())
                 await clean_up(ws, stream_task, browser, page, profile_lock)
     except websockets.ConnectionClosed:
         print("client disconnected")
