@@ -154,7 +154,7 @@ async def get_page(path, username, port):
             user_data_dir=path,
             headless=False,
             proxy={
-                "server": f"http://{PROXY_HOST}:11000",
+                "server": f"http://{PROXY_HOST}:{port}",
                 "username": username,
                 "password": PROXY_PASSWORD
             },
@@ -177,22 +177,6 @@ async def get_page(path, username, port):
         )
 
         page = await browser.new_page()
-
-        check_page = await browser.new_page()
-
-        try:
-            await check_page.goto(
-                "https://api.ipify.org",
-                wait_until="domcontentloaded",
-                timeout=15000
-            )
-
-            ip = (await check_page.text_content("body")).strip()
-            print("Proxy IP:", ip)
-
-        finally:
-            await check_page.close()
-
         await page.set_viewport_size({"width": 1280, "height": 720})
         await page.goto("about:blank")
         await page.add_init_script("""
