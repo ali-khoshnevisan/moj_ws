@@ -189,6 +189,7 @@ async def get_page(path, username, port):
 
             ip = (await check_page.text_content("body")).strip()
             print("Proxy IP:", ip)
+            print("Proxy port:", port)
 
         finally:
             await check_page.close()
