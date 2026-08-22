@@ -154,7 +154,7 @@ async def get_page(path, username, port):
             user_data_dir=path,
             headless=False,
             proxy={
-                "server": f"http://{PROXY_HOST}:{port}",
+                "server": f"http://{PROXY_HOST}:11000",
                 "username": username,
                 "password": PROXY_PASSWORD
             },
@@ -189,7 +189,6 @@ async def get_page(path, username, port):
 
             ip = (await check_page.text_content("body")).strip()
             print("Proxy IP:", ip)
-            print("Proxy port:", port)
 
         finally:
             await check_page.close()
