@@ -385,7 +385,7 @@ async def add_handler(ws):
                         print(f"error in Cookie extraction: {e}")
                 if profile_path and platform and url and session_data_str:
                     max_actions_count = max_actions_per_hour["follow"] + max_actions_per_hour["comment"] + max_actions_per_hour["like"] + max_actions_per_hour["direct"]
-                    pause_time = math.ceil(60 / max_actions_count)
+                    pause_time = math.ceil(24 / max_actions_count)
                     async with aiohttp.ClientSession() as session:
                         async with session.post(
                                 DJANGO_SERVICE_CREATE_PROFILE_URL,
@@ -543,9 +543,6 @@ async def edit_handler(ws):
                         failure_kind = "error"
                         print(f"error in Cookie extraction (Edit Mode): {e}")
 
-                # Instagram rejected the login (challenge/checkpoint, dead
-                # session, bad credentials). Retrying can't fix it, so flag
-                # the profile for manual attention and stop here.
                 if failure_kind == "auth" and bot_id:
                     await patch_profile(bot_id, auth_headers, {
                         "status": "profile-is-not-login",
@@ -563,6 +560,7 @@ async def edit_handler(ws):
                 if session_data_str and bot_id:
                     ok = await patch_profile(bot_id, auth_headers, {
                         "firefox_json_path": session_data_str,
+                        "status": "requested",
                     })
                     if ok:
                         await ws.send(json.dumps({"status": "profile session updated successfully"}))
