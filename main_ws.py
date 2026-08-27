@@ -3,6 +3,7 @@ import json
 import base64
 import math
 import os
+import re
 import shutil
 from urllib.parse import urljoin
 import websockets
@@ -22,6 +23,33 @@ PROXY_HOST = "proxy.ghostvps.com"
 PROXY_PASSWORD = "92964b4ea532a8e1"
 PROFILE_LOCK_DIR = os.path.join(PROFILES_DIR, ".locks")
 PROFILE_LOCK_TIMEOUT = 180
+
+COUNTRY_LOCALE_MAP = {
+    "us": {"country": "US", "country_code": 1, "locale": "en_US", "timezone_offset": -14400},   # US Eastern
+    "de": {"country": "DE", "country_code": 49, "locale": "de_DE", "timezone_offset": 3600},     # CET
+    "fr": {"country": "FR", "country_code": 33, "locale": "fr_FR", "timezone_offset": 3600},     # CET
+    "gb": {"country": "GB", "country_code": 44, "locale": "en_GB", "timezone_offset": 0},        # GMT
+    "es": {"country": "ES", "country_code": 34, "locale": "es_ES", "timezone_offset": 3600},     # CET
+    "it": {"country": "IT", "country_code": 39, "locale": "it_IT", "timezone_offset": 3600},     # CET
+    "nl": {"country": "NL", "country_code": 31, "locale": "nl_NL", "timezone_offset": 3600},     # CET
+    "tr": {"country": "TR", "country_code": 90, "locale": "tr_TR", "timezone_offset": 10800},    # TRT
+}
+
+
+def country_from_proxy_username(proxy_username):
+    match = re.search(r"cr\.([a-z]{2})", proxy_username or "", re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
+def apply_locale_for_country(client, country_code):
+    locale_data = COUNTRY_LOCALE_MAP.get((country_code or "").lower())
+    if not locale_data:
+        print(f"no locale mapping for country '{country_code}', leaving instagrapi defaults (US)")
+        return
+    client.country = locale_data["country"]
+    client.country_code = locale_data["country_code"]
+    client.locale = locale_data["locale"]
+    client.timezone_offset = locale_data["timezone_offset"]
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(PROFILE_LOCK_DIR, exist_ok=True)
@@ -54,9 +82,13 @@ def generate_instagrapi_session(playwright_cookies, output_json_path, port, user
         cl = Client()
         proxy_url = f"{username}:{PROXY_PASSWORD}@{PROXY_HOST}:{port}"
         cl.set_proxy(proxy_url)
+
+        country_code = country_from_proxy_username(username)
+        apply_locale_for_country(cl, country_code)
+
         cl.login_by_sessionid(cookie_dict["sessionid"])
         cl.dump_settings(output_json_path)
-        print(f"session file created successfully: {output_json_path}")
+        print(f"session file created successfully: {output_json_path} (locale country={cl.country})")
         return True, None
     except (ChallengeRequired, LoginRequired, BadPassword) as e:
         print(f"instagram rejected the login ({type(e).__name__}): {e}")
