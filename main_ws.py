@@ -5,6 +5,7 @@ import math
 import os
 import re
 import shutil
+import random
 from urllib.parse import urljoin
 import websockets
 import aiohttp
@@ -24,15 +25,48 @@ PROXY_PASSWORD = "92964b4ea532a8e1"
 PROFILE_LOCK_DIR = os.path.join(PROFILES_DIR, ".locks")
 PROFILE_LOCK_TIMEOUT = 180
 
+# ---------- Device Diversity ----------
+FIREFOX_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:129.0) Gecko/20100101 Firefox/129.0",
+]
+
+VIEWPORTS = [
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 900},
+    {"width": 1536, "height": 864},
+    {"width": 1600, "height": 900},
+    {"width": 1920, "height": 1080},
+    {"width": 1280, "height": 720},
+    {"width": 1680, "height": 1050},
+]
+
+PLATFORMS = ["Win32", "MacIntel", "Linux x86_64"]
+
 COUNTRY_LOCALE_MAP = {
-    "us": {"country": "US", "country_code": 1, "locale": "en_US", "timezone_offset": -14400},   # US Eastern
-    "de": {"country": "DE", "country_code": 49, "locale": "de_DE", "timezone_offset": 3600},     # CET
-    "fr": {"country": "FR", "country_code": 33, "locale": "fr_FR", "timezone_offset": 3600},     # CET
-    "gb": {"country": "GB", "country_code": 44, "locale": "en_GB", "timezone_offset": 0},        # GMT
-    "es": {"country": "ES", "country_code": 34, "locale": "es_ES", "timezone_offset": 3600},     # CET
-    "it": {"country": "IT", "country_code": 39, "locale": "it_IT", "timezone_offset": 3600},     # CET
-    "nl": {"country": "NL", "country_code": 31, "locale": "nl_NL", "timezone_offset": 3600},     # CET
-    "tr": {"country": "TR", "country_code": 90, "locale": "tr_TR", "timezone_offset": 10800},    # TRT
+    "us": {"country": "US", "country_code": 1, "locale": "en_US", "timezone_offset": -14400,
+           "accept_lang": "en-US,en;q=0.9"},
+    "de": {"country": "DE", "country_code": 49, "locale": "de_DE", "timezone_offset": 3600,
+           "accept_lang": "de-DE,de;q=0.9,en;q=0.8"},
+    "fr": {"country": "FR", "country_code": 33, "locale": "fr_FR", "timezone_offset": 3600,
+           "accept_lang": "fr-FR,fr;q=0.9,en;q=0.8"},
+    "gb": {"country": "GB", "country_code": 44, "locale": "en_GB", "timezone_offset": 0,
+           "accept_lang": "en-GB,en;q=0.9"},
+    "es": {"country": "ES", "country_code": 34, "locale": "es_ES", "timezone_offset": 3600,
+           "accept_lang": "es-ES,es;q=0.9,en;q=0.8"},
+    "it": {"country": "IT", "country_code": 39, "locale": "it_IT", "timezone_offset": 3600,
+           "accept_lang": "it-IT,it;q=0.9,en;q=0.8"},
+    "nl": {"country": "NL", "country_code": 31, "locale": "nl_NL", "timezone_offset": 3600,
+           "accept_lang": "nl-NL,nl;q=0.9,en;q=0.8"},
+    "tr": {"country": "TR", "country_code": 90, "locale": "tr_TR", "timezone_offset": 10800,
+           "accept_lang": "tr-TR,tr;q=0.9,en;q=0.8"},
 }
 
 
@@ -50,6 +84,25 @@ def apply_locale_for_country(client, country_code):
     client.country_code = locale_data["country_code"]
     client.locale = locale_data["locale"]
     client.timezone_offset = locale_data["timezone_offset"]
+
+
+def get_random_device_config(country_code=None):
+    ua = random.choice(FIREFOX_USER_AGENTS)
+    viewport = random.choice(VIEWPORTS)
+    platform = random.choice(PLATFORMS)
+
+    locale_data = COUNTRY_LOCALE_MAP.get((country_code or "us").lower(), COUNTRY_LOCALE_MAP["us"])
+
+    return {
+        "user_agent": ua,
+        "viewport": viewport,
+        "platform": platform,
+        "locale": locale_data["locale"].replace("_", "-"),
+        "accept_lang": locale_data["accept_lang"],
+        "hardware_concurrency": random.choice([4, 6, 8, 12, 16]),
+        "device_memory": random.choice([4, 8, 16]),
+    }
+
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(PROFILE_LOCK_DIR, exist_ok=True)
@@ -86,6 +139,43 @@ def generate_instagrapi_session(playwright_cookies, output_json_path, port, user
         country_code = country_from_proxy_username(username)
         apply_locale_for_country(cl, country_code)
 
+        devices = [
+            {
+                "app_version": "269.0.0.18.75",
+                "android_version": 33,
+                "android_release": "13",
+                "dpi": "480dpi",
+                "resolution": "1080x2400",
+                "manufacturer": "Samsung",
+                "device": "SM-G998B",
+                "model": "SM-G998B",
+                "cpu": "qcom",
+            },
+            {
+                "app_version": "270.0.0.20.75",
+                "android_version": 34,
+                "android_release": "14",
+                "dpi": "420dpi",
+                "resolution": "1080x2340",
+                "manufacturer": "Google",
+                "device": "Pixel 7",
+                "model": "Pixel 7",
+                "cpu": "tensor",
+            },
+            {
+                "app_version": "268.0.0.15.75",
+                "android_version": 32,
+                "android_release": "12",
+                "dpi": "440dpi",
+                "resolution": "1080x2400",
+                "manufacturer": "Xiaomi",
+                "device": "2201116SG",
+                "model": "2201116SG",
+                "cpu": "qcom",
+            },
+        ]
+        cl.set_device(random.choice(devices))
+
         cl.login_by_sessionid(cookie_dict["sessionid"])
         cl.dump_settings(output_json_path)
         print(f"session file created successfully: {output_json_path} (locale country={cl.country})")
@@ -97,8 +187,8 @@ def generate_instagrapi_session(playwright_cookies, output_json_path, port, user
         print(f"error in create session id with instagrapi: {e}")
         return False, "error"
 
+
 async def patch_profile(bot_id, auth_headers, payload):
-    """PATCH fields onto a profile in Django. Returns True on 2xx."""
     update_url = f"{DJANGO_SERVICE_CREATE_PROFILE_URL.rstrip('/')}/{bot_id}/"
     try:
         async with aiohttp.ClientSession() as session:
@@ -173,13 +263,17 @@ async def stream(ws, page):
     except Exception as e:
         print("stream error:", e)
 
-async def get_page(path, username, port):
+
+async def get_page(path, username, port, country_code=None):
     lock = FileLock(
         profile_lock_path(path),
         timeout=PROFILE_LOCK_TIMEOUT,
         thread_local=False,
     )
     await asyncio.to_thread(lock.acquire)
+
+    device = get_random_device_config(country_code)
+    print(f"[Device] UA={device['user_agent'][:60]}... | Viewport={device['viewport']} | Platform={device['platform']}")
 
     try:
         browser = await playwright.firefox.launch_persistent_context(
@@ -190,12 +284,16 @@ async def get_page(path, username, port):
                 "username": username,
                 "password": PROXY_PASSWORD
             },
-            locale="en-US",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            locale=device["locale"],
+            user_agent=device["user_agent"],
+            viewport=device["viewport"],
+            extra_http_headers={
+                "Accept-Language": device["accept_lang"]
+            },
             firefox_user_prefs={
-                "intl.accept_languages": "en-US,en",
-                "intl.locale.requested": "en-US",
-                "javascript.use_us_english_locale": True,
+                "intl.accept_languages": device["accept_lang"].split(",")[0],
+                "intl.locale.requested": device["locale"],
+                "javascript.use_us_english_locale": False,
                 "media.peerconnection.enabled": False,
                 "geo.enabled": False,
                 "toolkit.telemetry.enabled": False,
@@ -203,18 +301,40 @@ async def get_page(path, username, port):
                 "browser.startup.homepage_override.mstone": "ignore",
                 "startup.homepage_welcome_url": "about:blank",
                 "startup.homepage_welcome_url.additional": "",
-                "browser.usedOnWindows10": True,
                 "toolkit.telemetry.reportingpolicy.firstRun": False,
+                "privacy.resistFingerprinting": False,  # چون خودمون اسپوف می‌کنیم
+                "dom.webdriver.enabled": False,
             }
         )
 
         page = await browser.new_page()
-        await page.set_viewport_size({"width": 1280, "height": 720})
+
+        # Init script قوی‌تر برای تنوع fingerprint
+        init_script = f"""
+            Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+            Object.defineProperty(navigator, 'languages', {{ get: () => {json.dumps(device["accept_lang"].split(","))} }});
+            Object.defineProperty(navigator, 'platform', {{ get: () => '{device["platform"]}' }});
+            Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {device["hardware_concurrency"]} }});
+            Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {device["device_memory"]} }});
+            Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => 0 }});
+
+            // کمی نویز به canvas (خیلی ساده)
+            const originalGetContext = HTMLCanvasElement.prototype.getContext;
+            HTMLCanvasElement.prototype.getContext = function(type) {{
+                const context = originalGetContext.apply(this, arguments);
+                if (type === '2d') {{
+                    const originalFillText = context.fillText;
+                    context.fillText = function() {{
+                        originalFillText.apply(this, arguments);
+                    }};
+                }}
+                return context;
+            }};
+        """
+        await page.add_init_script(init_script)
+
         await page.goto("about:blank")
-        await page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        """)
+
     except Exception:
         release_lock(lock)
         raise
@@ -239,8 +359,6 @@ async def clean_up(ws, stream_task, browser, page, lock=None):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            # Must not propagate: an exception here used to skip the lock
-            # release entirely.
             print("stream task error during cleanup:", e)
 
     if page:
@@ -255,15 +373,13 @@ async def clean_up(ws, stream_task, browser, page, lock=None):
         except:
             pass
 
-    # Release AFTER the browser is closed — Firefox only lets go of the
-    # profile directory at that point. Outside `if browser` so the lock is
-    # returned even when the browser failed to start.
     release_lock(lock)
 
     try:
         await ws.close()
     except:
         pass
+
 
 async def add_handler(ws):
     browser = None
@@ -281,7 +397,6 @@ async def add_handler(ws):
         async for msg in ws:
             data = json.loads(msg)
 
-            # 🟢 init
             if data["type"] == "init":
                 country = data["country"]
                 proxy_username = f"b8f3fab422699782c1f0__cr.{country};sessttl.120"
@@ -298,13 +413,13 @@ async def add_handler(ws):
                 else:
                     profile_path, profile_name, port = data
                     browser, page, profile_lock = await get_page(
-                        profile_path, proxy_username, port
+                        profile_path, proxy_username, port, country_code=country
                     )
 
                     await ws.send(json.dumps({
                         "type": "size",
-                        "w": 1280,
-                        "h": 720
+                        "w": page.viewport_size["width"],
+                        "h": page.viewport_size["height"]
                     }))
 
                     if stream_task is None:
@@ -333,13 +448,11 @@ async def add_handler(ws):
                         pass
                     stream_task = None
 
-
                 await ws.send(json.dumps({
                     "type": "reset_success",
                     "msg": "لطفا دوباره کشور را انتخاب کنید."
                 }))
 
-            # 🌍 goto
             elif data["type"] == "goto":
                 print('page:', page)
                 url = None
@@ -360,11 +473,9 @@ async def add_handler(ws):
                         "msg": "platform is not available"
                     }))
 
-            # 🖱 click
             elif data["type"] == "click":
                 await page.mouse.click(data["x"], data["y"])
 
-            # ⌨ type
             elif data["type"] == "type":
                 if data["text"] == "Backspace":
                     await page.keyboard.press("Backspace")
@@ -405,7 +516,6 @@ async def add_handler(ws):
                         else:
                             print('Session creation failed or file does not exist.')
                             if failure_kind == "auth":
-                                # New profile never actually got logged in.
                                 await ws.send(json.dumps({
                                     "type": "error",
                                     "msg": "Instagram rejected this login (challenge or "
@@ -416,8 +526,9 @@ async def add_handler(ws):
                     except Exception as e:
                         print(f"error in Cookie extraction: {e}")
                 if profile_path and platform and url and session_data_str:
-                    max_actions_count = max_actions_per_hour["follow"] + max_actions_per_hour["comment"] + max_actions_per_hour["like"] + max_actions_per_hour["direct"]
-                    pause_time = math.ceil(24 / max_actions_count)
+                    max_actions_count = max_actions_per_hour["follow"] + max_actions_per_hour["comment"] + \
+                                        max_actions_per_hour["like"] + max_actions_per_hour["direct"]
+                    pause_time = math.ceil(24 / max_actions_count) if max_actions_count > 0 else 1
                     async with aiohttp.ClientSession() as session:
                         async with session.post(
                                 DJANGO_SERVICE_CREATE_PROFILE_URL,
@@ -444,10 +555,7 @@ async def add_handler(ws):
                             if 200 <= int(response.status) < 300:
                                 await ws.send(json.dumps({"status": "profile is created"}))
                             else:
-                                print(response)
-
                                 await ws.send(json.dumps({"status": "profile is not created"}))
-                                profile_state = False
 
                             try:
                                 print(await response.json())
@@ -474,6 +582,7 @@ async def edit_handler(ws):
     bot_id = None
     auth_headers = {}
     session_data_str = None
+    country = None
 
     try:
         async for msg in ws:
@@ -498,6 +607,7 @@ async def edit_handler(ws):
                 proxy_username = bot_info['proxy']['username']
                 port = bot_info['proxy']['port']
                 platform = bot_info['social_media'].lower()
+                country = country_from_proxy_username(proxy_username)
 
                 await ws.send(json.dumps({
                     "type": "size",
@@ -507,8 +617,13 @@ async def edit_handler(ws):
 
                 try:
                     browser, page, profile_lock = await get_page(
-                        profile_path, proxy_username, port
+                        profile_path, proxy_username, port, country_code=country
                     )
+                    await ws.send(json.dumps({
+                        "type": "size",
+                        "w": page.viewport_size["width"],
+                        "h": page.viewport_size["height"]
+                    }))
                 except LockTimeout:
                     await ws.send(json.dumps({
                         "type": "error",
@@ -534,11 +649,9 @@ async def edit_handler(ws):
                         "msg": "platform is not available"
                     }))
 
-            # 🖱 click
             elif data["type"] == "click":
                 await page.mouse.click(data["x"], data["y"])
 
-            # ⌨ type
             elif data["type"] == "type":
                 if data["text"] == "Backspace":
                     await page.keyboard.press("Backspace")
@@ -605,7 +718,6 @@ async def edit_handler(ws):
 
     finally:
         await clean_up(ws, stream_task, browser, page, profile_lock)
-            # stop_proxy(pid)
 
 
 async def router(ws):
@@ -627,7 +739,7 @@ async def main():
 
     server = await websockets.serve(router, "0.0.0.0", 9000)
 
-    print("Remote Playwright Browser running...")
+    print("Remote Playwright Browser running with Device Diversity...")
 
     await server.wait_closed()
 
