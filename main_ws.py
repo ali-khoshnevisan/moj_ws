@@ -1,6 +1,7 @@
 import asyncio
 import json
 import base64
+import hashlib
 import math
 import os
 import re
@@ -104,6 +105,29 @@ def get_random_device_config(country_code=None):
     }
 
 
+def get_device_config_for_profile(profile_path, country_code=None):
+    digest = hashlib.md5(profile_path.encode("utf-8")).hexdigest()
+    seed = int(digest, 16)
+
+    ua = FIREFOX_USER_AGENTS[seed % len(FIREFOX_USER_AGENTS)]
+    viewport = VIEWPORTS[seed % len(VIEWPORTS)]
+    platform = PLATFORMS[seed % len(PLATFORMS)]
+    hardware_concurrency = [4, 6, 8, 12, 16][seed % 5]
+    device_memory = [4, 8, 16][seed % 3]
+
+    locale_data = COUNTRY_LOCALE_MAP.get((country_code or "us").lower(), COUNTRY_LOCALE_MAP["us"])
+
+    return {
+        "user_agent": ua,
+        "viewport": viewport,
+        "platform": platform,
+        "locale": locale_data["locale"].replace("_", "-"),
+        "accept_lang": locale_data["accept_lang"],
+        "hardware_concurrency": hardware_concurrency,
+        "device_memory": device_memory,
+    }
+
+
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(PROFILE_LOCK_DIR, exist_ok=True)
 
@@ -139,46 +163,39 @@ def generate_instagrapi_session(playwright_cookies, output_json_path, port, user
         country_code = country_from_proxy_username(username)
         apply_locale_for_country(cl, country_code)
 
-        devices = [
-            {
-                "app_version": "269.0.0.18.75",
-                "android_version": 33,
-                "android_release": "13",
-                "dpi": "480dpi",
-                "resolution": "1080x2400",
-                "manufacturer": "Samsung",
-                "device": "SM-G998B",
-                "model": "SM-G998B",
-                "cpu": "qcom",
-            },
-            {
-                "app_version": "270.0.0.20.75",
-                "android_version": 34,
-                "android_release": "14",
-                "dpi": "420dpi",
-                "resolution": "1080x2340",
-                "manufacturer": "Google",
-                "device": "Pixel 7",
-                "model": "Pixel 7",
-                "cpu": "tensor",
-            },
-            {
-                "app_version": "268.0.0.15.75",
-                "android_version": 32,
-                "android_release": "12",
-                "dpi": "440dpi",
-                "resolution": "1080x2400",
-                "manufacturer": "Xiaomi",
-                "device": "2201116SG",
-                "model": "2201116SG",
-                "cpu": "qcom",
-            },
+        hardware_profiles = [
+            {"android_version": 33, "android_release": "13", "dpi": "480dpi",
+             "resolution": "1080x2400", "manufacturer": "Samsung",
+             "device": "SM-G998B", "model": "SM-G998B", "cpu": "qcom"},
+            {"android_version": 34, "android_release": "14", "dpi": "420dpi",
+             "resolution": "1080x2340", "manufacturer": "Google/google",
+             "device": "panther", "model": "Pixel 7", "cpu": "panther"},
+            {"android_version": 34, "android_release": "14", "dpi": "480dpi",
+             "resolution": "1344x2992", "manufacturer": "Google/google",
+             "device": "husky", "model": "Pixel 8 Pro", "cpu": "husky"},
         ]
-        cl.set_device(random.choice(devices))
+        app_versions = [
+            {"app_version": "428.0.0.47.67", "version_code": "961145276",
+             "bloks_versioning_id": "7189b949425f9bf80ea8bd880cf5a3080b292d9b1c4b38a18d112f7c4b71e7a8"},
+            {"app_version": "385.0.0.47.74", "version_code": "378906843",
+             "bloks_versioning_id": "a8973d49a9cc6a6f65a4997c10216ce2a06f65a517010e64885e92029bb19221"},
+            {"app_version": "364.0.0.35.86", "version_code": "374010953",
+             "bloks_versioning_id": "8ccf54aad76788a6ca03ddfc33afcdcf692f2f5a3ba814ea73d5facba7fa2c2d"},
+        ]
+
+        account_key = cookie_dict.get("ds_user_id", cookie_dict["sessionid"])
+        digest = int(hashlib.md5(account_key.encode("utf-8")).hexdigest(), 16)
+        hardware = hardware_profiles[digest % len(hardware_profiles)]
+        app_info = app_versions[digest % len(app_versions)]
+
+        cl.set_device(hardware)
+        cl.device_settings.update(app_info)
+        cl.bloks_versioning_id = app_info["bloks_versioning_id"]
+        cl.set_user_agent()
 
         cl.login_by_sessionid(cookie_dict["sessionid"])
         cl.dump_settings(output_json_path)
-        print(f"session file created successfully: {output_json_path} (locale country={cl.country})")
+        print(f"session file created successfully: {output_json_path} (locale country={cl.country}, device={hardware['model']}, app_version={app_info['app_version']})")
         return True, None
     except (ChallengeRequired, LoginRequired, BadPassword) as e:
         print(f"instagram rejected the login ({type(e).__name__}): {e}")
@@ -272,7 +289,7 @@ async def get_page(path, username, port, country_code=None):
     )
     await asyncio.to_thread(lock.acquire)
 
-    device = get_random_device_config(country_code)
+    device = get_device_config_for_profile(path, country_code)
     print(f"[Device] UA={device['user_agent'][:60]}... | Viewport={device['viewport']} | Platform={device['platform']}")
 
     try:
